@@ -467,9 +467,12 @@ sub do_node {
   }
 
   my $socket;
-  
-  if (munin_get ($newconf, "local_address"))
-  {
+
+  if (munin_get ($newconf, "socket")) {
+      $socket = new IO::Socket::UNIX ('Peer' => munin_get($newconf, "socket"),
+                  'Type' => SOCK_STREAM,
+                  'Timeout' => munin_get($newconf, "timeout", 60));
+  } elsif (munin_get ($newconf, "local_address")) {
       $socket = new IO::Socket::INET ('PeerAddr' => "$newconf->{address}:".
 	          munin_get ($newconf, "port", "4949"), 
 		  'LocalAddr' => munin_get ($newconf, "local_address", undef),
