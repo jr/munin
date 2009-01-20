@@ -1,7 +1,7 @@
 #!@@PERL@@
 # -*- perl -*-
 #
-# Copyright (C) 2002-2008 Jimmy Olsen, Audun Ytterdal
+# Copyright (C) 2002-2009 Jimmy Olsen, Audun Ytterdal
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -28,14 +28,14 @@ use Getopt::Long;
 use Time::HiRes;
 use Munin;
 use POSIX qw(strftime);
+use Log::Log4perl qw(:easy);
 
 my @times = ( "day", "week", "month", "year" );
 
 my @limit_hosts;
-my $DEBUG=0;
+my $MDEBUG=0;
 my $VERSION = "@@VERSION@@";
 my $conffile = "@@CONFDIR@@/munin.conf";
-my $force_root = 0;
 my $do_usage = 0;
 my $do_version = 0;
 my $stdout = 0;
@@ -44,10 +44,9 @@ my $log = new IO::Handle;
 # Get options
 $do_usage=1  unless
 GetOptions ( "host=s"       => \(),
-             "force-root!"  => \$force_root,
 	     "service=s"    => \(),
 	     "config=s"     => \$conffile,
-	     "debug!"       => \$DEBUG,
+	     "debug!"       => \$MDEBUG,
 	     "stdout!"      => \$stdout,
 	     "help"         => \$do_usage, 
 	     "version!"     => \$do_version );
@@ -57,7 +56,6 @@ if ($do_usage)
     print "Usage: $0 [options]
 
 Options:
-    --[no]force-root    Force running, even as root. [--noforce-root]
     --help		View this message.
     --debug		View debug messages.
     --version		View version information.
@@ -76,7 +74,7 @@ if ($do_version)
 munin-html version $VERSION.
 Written by Knut Haugen, Audun Ytterdal, Jimmy Olsen, Tore Anderson / Linpro AS
 
-Copyright (C) 2002-2006
+Copyright (C) 2002-2009
 
 This is free software released under the GNU General Public License. There
 is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR
@@ -87,11 +85,11 @@ EOT
     exit 0;
 }
 
-if ($> == 0 and !$force_root)
+if ($> == 0)
 {
-    print "You are running this program as root, which is dumb and will
-cause many problems later.  Please run it as user '@@USER@@'.
-If you really want to run it as root, use the --force-root option.
+    print "This program will easily break if you run it as root as you are
+trying now.  Please run it as user '@@USER@@'.  The correct 'su' command
+on many systems is 'su - munin --shell=/bin/bash'
 Aborting.\n\n";
     exit (1);
 }
@@ -101,6 +99,10 @@ my $update_time = Time::HiRes::time;
 my $config;
 my $limits;
 $config = &munin_config ($conffile, $config);
+
+logger_open($config->{'logdir'});
+logger_debug() if $MDEBUG;
+
 $limits = &munin_readconfig ($config->{dbdir}."/limits", 1, 1);
 if (!defined $config->{'cgiurl_graph'})
 {
@@ -163,51 +165,6 @@ print FILE $template->output;
 close FILE;
 
 munin_removelock("$config->{rundir}/munin-html.lock");
-
-sub logger_open {
-    my $dirname = shift;
-
-    if (!$log->opened)
-    {
-	  unless (open ($log, ">>$dirname/munin-html.log"))
-	  {
-		  print STDERR "Warning: Could not open log file \"$dirname/munin-html.log\" for writing: $!";
-	  }
-    }
-}
-
-sub logger {
-  my ($comment) = @_;
-  my $now = strftime "%b %d %H:%M:%S", localtime;
-
-  print "$now - $comment\n" if $stdout;
-  if ($log->opened)
-  {
-	  print $log "$now - $comment\n";
-  }
-  else
-  {
-	  if (defined $config->{logdir})
-	  {
-		  if (open ($log, ">>$config->{logdir}/munin-html.log"))
-		  {
-			  print $log "$now - $comment\n";
-			  $log->flush;
-			  close (STDERR);
-			  open (STDERR, ">&", $log);
-		  }
-		  else
-		  {
-			  print STDERR "Warning: Could not open log file \"$config->{logdir}/munin-html.log\" for writing: $!";
-			  print STDERR "$now - $comment\n";
-		  }
-	  }
-	  else
-	  {
-		  print STDERR "$now - $comment\n";
-	  }
-    }
-}
 
 sub calculate_png_size
 {
@@ -661,8 +618,7 @@ sub generate_service_templates {
 	next if (ref ($fieldobj) != "HASH" or !defined $fieldobj->{'label'});
 	next if (!munin_draw_field ($fieldobj));
 
-	logger ("DEBUG: single_value: Checking field \"$f\" ($path).")
-	    if $DEBUG;
+	DEBUG "DEBUG: single_value: Checking field \"$f\" ($path).";
 
 	if (defined $path) {
 	    # This call is to make sure field settings are copied
@@ -751,10 +707,6 @@ munin-html [options]
 
 =over 5
 
-=item B<< --[no]force-root >>
-
-Force running as root (stupid and unnecessary). [--noforce-root]
-
 =item B<< --service <service> >>
 
 Limit services to those of E<lt>serviceE<gt>. Multiple --service options may be supplied. [unset]
@@ -814,7 +766,7 @@ Please report other bugs in the bug tracker at L<http://munin.sf.net/>.
 
 =head1 COPYRIGHT
 
-Copyright (C) 2002-2008 Knut Haugen, Audun Ytterdal, and Jimmy Olsen /
+Copyright (C) 2002-2009 Knut Haugen, Audun Ytterdal, and Jimmy Olsen /
 Linpro AS.
 
 This is free software; see the source for copying conditions. There is

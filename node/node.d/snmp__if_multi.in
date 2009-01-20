@@ -3,7 +3,7 @@
 
 =head1 NAME
 
-snmp__if_ - SNMP wildcard plugin to monitor network interfaces of any networked equipment.
+snmp__if_multi - SNMP card plugin to monitor the network interfaces of any networked equipment.
 
 =head1 APPLICABLE SYSTEMS
 
@@ -49,12 +49,13 @@ counters (see FEATURES below).
 
 =head1 MAGIC MARKERS
 
-  #%# family=snmpauto
-  #%# capabilities=snmpconf
+  #%# familyyyyy=snmpauto
+  #%# familyyyyy=contrib
+  #%# capabilitiesssss=snmpconf
 
 =head1 VERSION
 
-  $Id$
+  $Id: snmp__if_.in 1818 2009-01-03 19:29:30Z janl $
 
 =head1 BUGS
 
@@ -80,9 +81,14 @@ around.
 
 =head1 AUTHOR
 
-Copyright (C) 2004-2009 Jimmy Olsen, Daginn Ilmari Mannsaaker.
-Documentation, porting to Munin::Plugin::SNMP and further grooming by
-Nicolai Langfeldt.
+Copyright (C) 2004-2009 Jimmy Olsen, Dagfinn Ilmari Mannsaaker,
+Nicolai Langfeldt and Linpro AS.
+
+Original snmp__if_ plugin: Copyright (C) 2004-2009 Jimmy Olsen, Dagfinn
+Ilmari Mannsaaker.  Documentation, porting to Munin::Plugin::SNMP and
+further grooming by Nicolai Langfeldt.
+
+Reworked to snmp__if_multi by Nicolai Langfeldt
 
 Initial SNMPv3 support by "Confusedhacker".
 
@@ -127,50 +133,94 @@ my $iface;
 if (defined $ARGV[0] and $ARGV[0] eq "snmpconf") {
 	print "number  1.3.6.1.2.1.2.1.0\n";
 	print "index   1.3.6.1.2.1.2.2.1.1.\n";
-	print "require 1.3.6.1.2.1.2.2.1.5. [1-9]\n";  # Speed
-	print "require 1.3.6.1.2.1.2.2.1.10. [1-9]\n"; # ifInOctets
+	print "require 1.3.6.1.2.1.2.2.1.3. ^(6|23)\$\n"; # Type
+	print "require 1.3.6.1.2.1.2.2.1.5. [1-9]\n"; # Speed
 	exit 0;
 }
 
-if ($Munin::Plugin::me =~ /_if_(\d+)$/) {
-    $iface = $1;
-} else {
-    die "Could not determine interface number from ".$Munin::Plugin::me."\n";
-}
+my $sysDescr           = '1.3.6.1.2.1.1.1.0';
+my $sysLocation        = '1.3.6.1.2.1.1.6.0';
+my $sysContact         = '1.3.6.1.2.1.1.4.0';
+my $sysName            = '1.3.6.1.2.1.1.5.0';
 
-my $ifEntryDescr       = "1.3.6.1.2.1.2.2.1.2.$iface";
-my $ifEntrySpeed       = "1.3.6.1.2.1.2.2.1.5.$iface";
-my $ifEntryStatus      = "1.3.6.1.2.1.2.2.1.8.$iface";
-my $ifEntryInOctets    = "1.3.6.1.2.1.2.2.1.10.$iface";
-my $ifEntryOutOctets   = "1.3.6.1.2.1.2.2.1.16.$iface";
-
-# Only available with SNMPv2 and up.
-my $ifEntryAlias       = "1.3.6.1.2.1.31.1.1.1.18.$iface";
-my $ifEntryIn64Octets  = "1.3.6.1.2.1.31.1.1.1.6.$iface";
-my $ifEntryOut64Octets = "1.3.6.1.2.1.31.1.1.1.10.$iface";
+my $ifOIDBase          = "1.3.6.1.2.1.2.2.1";		# ifEntry
+my $ifv2OIDBase        = "1.3.6.1.2.1.31.1.1.1";	# ifXEntry
 
 my ($session, $error);
 
 # SNMP needed for both config and fetch.
 $session = Munin::Plugin::SNMP->session();
 
-if ($ARGV[0] and $ARGV[0] eq "config") {
-    my ($host,undef,$version) = Munin::Plugin::SNMP->config_session();
+my $snmpinfo = $session->get_hash(
+				  -baseoid => $ifOIDBase,
+				  -cols    =>
+				  { 2  => 'ifDescr',
+				    # Type: 6) ethernetCsmacd 23) ppp
+				    # 32) frameRelay(DTE) 37) adm
+				    # 44) FrameRelayService 49) aal5
+				    # 53) propVirtual
+				    # 56) fibreChannel 94) adsl 95) radsl
+				    # 96) sdsl 97) vdsl 105) atmDxi
+				    # 106) atmFuni 107) atmIma
+				    # 108) pppMultilinkBundle
+				    # 114) ipOverAtm 131) tunnel
+				    # 125) fast - depreciated
+				    # 149) atmVirtual 150) mplsTunnel
+				    # 160) usb 166) mpls 168) hdsl2
+				    # 169) shdsl 199) infiniband 230) adsl2
+				    3  => 'ifType',
+				    4  => 'ifMtu',
+				    5  => 'ifSpeed',
+				    6  => 'ifMac',
+				    7  => 'ifAdminStatus',
+				    # Oper: 1) up 2) down 3) testing
+				    # 4) unknown, 5) dormant 6) not present
+				    # 7) lowerLayerDown
+				    8  => 'ifOperStatus',
+				    10 => 'ifInOctets',
+				    11 => 'ifInUcastPkts',
+				    12 => 'ifInNUcastPkts', # Depreciated
+				    13 => 'ifInDiscards',
+				    14 => 'ifInErrors',
+				    15 => 'ifUnUnknownProtos',
+				    16 => 'ifOutOctets',
+				    17 => 'ifOutUcastPkts', # Depreciated
+				    18 => 'ifOutNUcastPkts',
+				    19 => 'ifOutDiscards',
+				    20 => 'ifOutErrors',
+				    21 => 'ifOutQLen',      # Depreciated
+				  });
+
+
+my $snmpinfoX = $session->get_hash( # ifXEntry - SNMP v2 and up only
+				    -baseoid => $ifv2OIDBase,
+				    -cols    =>
+				    { 2  => 'ifInMulticastPkts',
+				      3  => 'ifInBroadcastPkts',
+				      4  => 'ifOutMulticastPkts',
+				      5  => 'ifOutBroadcastPkts',
+				      6  => 'ifHCInOctets',
+				      10 => 'ifHCOutOctets',
+				      18 => 'ifAlias',
+				    });
+
+sub do_config_if {
+    my ($host,$version,$if) = @_;
+
+    print "multigraph if/bytes/$if config\n";
 
     print "host_name $host\n" unless $host eq 'localhost';
 
-    my $alias = $session->get_single($ifEntryAlias) ||
-      $session->get_single($ifEntryDescr) ||
-	"Interface $iface";
+    my $alias = $snmpinfo->{$if}->{ifDescr} || "Interface $if";
 
     if (! ($alias =~ /\d+/) ) {
 	# If there are no numbers in the $alias add the if index
-	$alias .=" (if $iface)";
+	$alias .=" (if $if)";
     }
 
     my $extrainfo = '';
 
-    if (defined ($response = $session->get_single($ifEntryStatus))) {
+    if (defined ($response = $snmpinfo->{$if}->{ifOperStatus})) {
 	if ($response == 2) {
 	    # Interface is down
 	    $extrainfo .= ' The interface is currently down.'
@@ -180,21 +230,21 @@ if ($ARGV[0] and $ARGV[0] eq "config") {
     my $warn = undef;
     my $speed = undef;
 
-    if (defined ($speed = $session->get_single($ifEntrySpeed))) {
+    if (defined ($speed = $snmpinfo->{$if}->{ifSpeed})) {
 	$warn = $speed/8;
 
 	# Warn at 1/8th of actuall speed?  Or just remove warning?
-	# Tempted to set warning at 80%. 80% over 5 minutes is pretty
-	# busy.
+	# Tempted to set warning at 80%. 80% over 5 minutes is
+	# pretty busy.  But probably not relevant as a warning on
+	# a NFS server?
 
 	my $textspeed = scaleNumber($speed,,'bps','',
-				   'The interface speed is %.1f%s%s.');
+				    'The interface speed is %.1f%s%s.');
 
 	$extrainfo .= " ".$textspeed if $textspeed;
     }
 
-    if (defined ($session->get_single($ifEntryIn64Octets))) {
-
+    if (defined ($snmpinfoX->{$if}->{ifHCInOctets})) {
 	# If we get an answer at the 64 bit OID then this switch
 	# supports the extended MIB
 
@@ -229,30 +279,63 @@ if ($ARGV[0] and $ARGV[0] eq "config") {
     print "send.max $speed\n";
     print "send.min 0\n";
     print "send.warn $warn\n" if defined $warn;
-    exit 0;
 }
 
-if (defined ($response = $session->get_single($ifEntryStatus))) {
-    if ($response == 2) {
+
+sub do_fetch_if ($) {
+    my($if) = @_;
+
+    print "multigraph if/bytes/$if fetch\n";
+
+    if (defined ($response = $snmpinfo->{$if}->{ifOperStatus}) and
+	$response == 2) {
 	# Interface is down
 	print "recv.value U\n";
 	print "send.value U\n";
-	exit 0;
+	return;
+    }
+
+    if (defined ($response = $snmpinfo->{$if}->{ifHCInOctets} ||
+		 $snmpinfo->{$if}->{ifInOctets})) {
+	print "recv.value ", $response, "\n";
+    } else {
+	# No response...
+	print "recv.value U\n";
+    }
+
+    if (defined ($response = $snmpinfo->{$if}->{ifHCOutOctets} ||
+		 $snmpinfo->{$if}->{ifOutOctets})) {
+	print "send.value ", $response, "\n";
+    } else {
+	# No response...
+	print "send.value U\n";
     }
 }
 
-if (defined ($response = $session->get_single($ifEntryIn64Octets) ||
-	                 $session->get_single($ifEntryInOctets))) {
-    print "recv.value ", $response, "\n";
-} else {
-    # No response...
-    print "recv.value U\n";
+sub do_config {
+
+    my ($host,undef,$version) = Munin::Plugin::SNMP->config_session();
+
+    # Also do overview graph with all ports summarized
+    foreach my $if (sort {$a <=> $b} keys %{$snmpinfo}) {
+	do_config_if($host,$version,$if);
+	do_fetch_if($if); # if $dirtyconfig;
+    }
 }
 
-if (defined ($response = $session->get_single($ifEntryOut64Octets) ||
-	                 $session->get_single($ifEntryOutOctets))) {
-    print "send.value ", $response, "\n";
-} else {
-    # No response...
-    print "send.value U\n";
+sub do_fetch {
+    # Also do overview graph with all ports summarized and collected
+    # meta information in graph_info.
+    # Add to this error graphs and so on.  And meta information about
+    # interface type.
+    foreach my $if (sort {$a <=> $b} keys %{$snmpinfo}) {
+	do_fetch_if($if);
+    }
 }
+
+if ($ARGV[0] and $ARGV[0] eq "config") {
+    do_config();
+    exit 0;
+}
+
+do_fetch();

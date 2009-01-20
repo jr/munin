@@ -62,7 +62,11 @@ use Exporter;
 	   'munin_find_field',
 	   'munin_get_parent',
 	   'munin_get_children',
-	   'munin_get_node_partialpath'
+	   'munin_get_node_partialpath',
+	   'logger_open',
+	   'logger_debug',
+	   'logger_level',
+	   'logger',
 	   );
 
 use strict;
@@ -70,6 +74,9 @@ use RRDs;
 use Fcntl qw(:DEFAULT :flock);
 use IO::Handle;
 use Symbol 'gensym';
+use POSIX qw(strftime);
+use Log::Log4perl qw(:easy);
+use Carp;
 
 my $VERSION = "@@VERSION@@";
 
@@ -78,6 +85,8 @@ my $config = undef;
 
 my $DEBUG=0;
 my $configfile="@@CONFDIR@@/munin.conf";
+
+my $logopened = 0;
 
 my @legal = ("tmpldir", "ncsa", "ncsa_server", "ncsa_config", "rundir",
 	"dbdir", "logdir", "htmldir", "include", "domain_order", "node_order",
@@ -97,14 +106,18 @@ my @legal = ("tmpldir", "ncsa", "ncsa_server", "ncsa_config", "rundir",
 	"version", "tls_certificate", "tls_private_key", "tls_pem",
 	"tls_verify_certificate", "tls_verify_depth", "tls_ca_certificate",
 	"graph_data_size", "colour", "graph_printf", "ok", "unknown",
-	 "palette", "realservname", "cdef_name", "graphable", "process", 
-	 "realname", "onlynullcdef", "group_order", "pipe", "pipe_command"
+	"palette", "realservname", "cdef_name", "graphable", "process",
+	"realname", "onlynullcdef", "group_order", "pipe", "pipe_command",
+	"unknown_limit", "notify_countdown",
     );
 
 my %legal_expanded = map { $_ => 1 } @legal;
 
 # Fields to copy when "aliasing" a field
-my @COPY_FIELDS    = ("label", "draw", "type", "rrdfile", "fieldname", "info"); 
+my @COPY_FIELDS    = ("label", "draw", "type", "rrdfile", "fieldname", "info");
+
+my @dircomponents = split('/',$0);
+my $me = pop(@dircomponents);
 
 sub munin_trend {
     my (@array) = @_;
@@ -116,7 +129,7 @@ sub munin_fetch {
     my ($start,$step,$names,$data) = RRDs::fetch $file,$type || "AVERAGE";
     unless (defined $data)
     {
-        ::logger ("Could not fetch data from $file(".($type||"AVERAGE")."): ". RRDs::error);
+        logger ("Could not fetch data from $file(".($type||"AVERAGE")."): ". RRDs::error);
         return undef;
     }
     my @array = map { @$_[0] } splice(@$data, $#$data - ($last || 1));
@@ -147,13 +160,13 @@ sub munin_nscasend {
     }
     if ($label)
     {
-	print $nsca  "$name\t$service: $label\t$level\t$comment\n";
-	print ("$name;$service: $label;$level;$comment\n") if $DEBUG;
+	print $nsca "$name\t$service: $label\t$level\t$comment\n";
+	DEBUG "To $nsca: $name;$service: $label;$level;$comment\n";
     }
     else
     {
-	print $nsca  "$name\t$service\t$level\t$comment\n";
-	print ("$name;$service;$level;$comment\n") if $DEBUG;
+	print $nsca "$name\t$service\t$level\t$comment\n";
+	DEBUG "To $nsca: $name;$service;$level;$comment\n";
     }
 }
 
@@ -161,12 +174,12 @@ sub munin_createlock {
     # Create lock file, fail and die if not possible.
     my ($lockname) = @_;
     if (sysopen (LOCK,$lockname,O_WRONLY | O_CREAT | O_EXCL)) {
-	print "Creating lock : $lockname succeded\n" if $DEBUG;
+	DEBUG "Creating lock : $lockname succeded\n";
 	print LOCK $$; # we want the pid inside for later use
 	close LOCK;
 	return 1;
     } else {
-	die "Creating lock $lockname failed: $!\n";
+	LOGCROAK("Creating lock $lockname failed: $!\n");
     }
 }
 
@@ -175,14 +188,13 @@ sub munin_removelock {
     my ($lockname) = @_;
 
     unlink $lockname or
-      die "Error deleting lock $lockname: $!\n";
+      LOGCROAK("Error deleting lock $lockname: $!\n");
 }
 
 sub munin_runlock {
     my ($lockname) = @_;
     unless (&munin_getlock($lockname)) {
-	print "Lock already exists: $lockname. Dying.\n";
-	exit 0;
+	LOGCROAK("Lock already exists: $lockname. Dying.\n");
     }
     return 1;
 }
@@ -197,10 +209,10 @@ sub munin_getlock {
 	# cron every 5 minutes this should not be a real threat.  This
 	# ream of code should complete in less than 5 minutes.
 
-	open LOCK,$lockname or 
-	  die "Could not open $lockname for reading: $!\n";
+	open LOCK,$lockname or
+	  LOGCROAK("Could not open $lockname for reading: $!\n");
 	my $pid = <LOCK>;
-	close(LOCK) or die "Could not close $lockname: $!\n";
+	close(LOCK) or LOGCROAK("Could not close $lockname: $!\n");
         # Make sure it's a proper pid
 	if (defined($pid) and $pid =~ /^(\d+)$/ and $1 != 1) {
 	    $pid = $1;
@@ -218,20 +230,25 @@ sub munin_delete {
     my ($config,$data) = @_;
     for my $domain (keys %{$data->{domain}}) {
 	unless ($config->{domain}->{$domain}) {
-	    ::logger("Removing domain: $domain");
+	    logger("Removing domain: $domain");
 	    delete ($data->{domain}->{$domain});
 	    next;
 	}
 	for my $node (keys %{$data->{domain}->{$domain}->{node}}) {
 	    unless ($config->{domain}->{$domain}->{node}->{$node}) {
-		::logger("Removing node from $domain: $node");
+		logger("Removing node from $domain: $node");
 		delete ($data->{domain}->{$domain}->{node}->{$node});
 	    }
 	}
     }
     return ($data);
 }
+
+
 sub munin_overwrite {
+    # Take contents of one config-namespace and replace/insert the
+    # instances needed.
+
     my ($configfile,$overwrite) = @_;
     for my $key (keys %$overwrite) {
         next if $key =~ /^#%#/;
@@ -250,11 +267,10 @@ sub munin_readconfig {
 
     $conf ||= $configfile;
     if (! -r $conf and ! $missingok) {
-	::logger ("munin_readconfig: cannot open '$conf'");
+	WARN "munin_readconfig: cannot open '$conf'";
 	return undef;
     }
-    if (open (CFG, $conf))
-    {
+    if (open (CFG, $conf)) {
 	@contents = <CFG>;
 	close (CFG);
     }
@@ -270,6 +286,7 @@ sub munin_readconfig {
     $config->{'spooldir'}||="@@SSPOOLDIR@@/";
     $config->{'#%#parent'}= undef;
     $config->{'#%#name'}= "root";
+
     return ($config);
 }
 
@@ -337,7 +354,7 @@ sub munin_get_var_path
     my $var  = shift;
     my $val  = shift;
 
-    print "DEBUG: Getting var \"$var\" = \"$val\"\n" if $DEBUG;
+    DEBUG "DEBUG: Getting var \"$var\" = \"$val\"\n";
     if ($var =~ /^\s*([^;:]+);([^;:]+):(\S+)\s*$/)
     {
 	my ($dom, $host, $rest) = ($1, $2, $3);
@@ -566,7 +583,7 @@ sub munin_get_parent {
 }
 
 # munin_get_node: Gets a node by loc
-# Parameters: 
+# Parameters:
 # - $hash: A ref to the hash to set the variable in
 # - $loc: A ref to an array with the full path of the node
 # Returns:
@@ -579,10 +596,12 @@ sub munin_get_node
 
     foreach my $tmpvar (@$loc) {
 	if ($tmpvar !~ /\S/) {
-	    ::logger ("Error: munin_get_node: Cannot work on hash node \"$tmpvar\"");
+	    logger ("Error: munin_get_node: Cannot work on hash node \"$tmpvar\"");
 	    return undef;
 	}
-	return undef if !exists $hash->{$tmpvar};
+	# This used to be "return undef" which seems a bit hash and also has
+	# been reported to be harmful. - janl
+	next if !exists $hash->{$tmpvar};
 	$hash = $hash->{$tmpvar};
     }
     return $hash;
@@ -622,7 +641,7 @@ sub munin_set_var_loc
     my $tmpvar = shift @aloc;
     $tmpvar = shift @aloc while (defined $tmpvar and $tmpvar =~ /^#%#/);
     if ($tmpvar !~ /\S/) {
-	::logger ("Error: munin_set_var_loc: Cannot work on hash node \"$tmpvar\"");
+	logger ("Error: munin_set_var_loc: Cannot work on hash node \"$tmpvar\"");
 	return undef;
     }
     if (@aloc > 0) {
@@ -632,7 +651,7 @@ sub munin_set_var_loc
 	}
         return munin_set_var_loc ($hash->{$tmpvar}, \@aloc, $val);
     } else {
-	::logger ("Warning: munin_set_var_loc: Setting unknown option \"$tmpvar\".")
+	logger ("Warning: munin_set_var_loc: Setting unknown option \"$tmpvar\".")
 	    unless defined $legal_expanded{$tmpvar};
         $hash->{$tmpvar} = $val;
 	return $hash;
@@ -676,7 +695,7 @@ sub munin_get_node_partialpath
 	my @leftarr = split (/;/, $1);
 	push @$varloc, @leftarr;
     } else {
-	::logger ("Error: munin_get_node_partialpath: Malformatted variable path \"$var\".");
+	logger ("Error: munin_get_node_partialpath: Malformatted variable path \"$var\".");
     }
 
     # We've got both parts of the loc (varloc and hashloc) -- let's figure out 
@@ -704,7 +723,8 @@ sub munin_set_var_path
 
     my $result = undef;
 
-    ::logger ("Debug: munin_set_var_path: Setting var \"$var\" = \"$val\"") if $DEBUG;
+    logger ("Debug: munin_set_var_path: Setting var \"$var\" = \"$val\"")
+      if $DEBUG;
     if ($var =~ /^\s*([^:]+):(\S+)\s*$/) {
 	my ($leftstring, $rightstring) = ($1, $2);
 
@@ -726,11 +746,11 @@ sub munin_set_var_path
 	my @leftarr = split (/;/, $1);
 	$result = munin_set_var_loc ($hash, [@leftarr], $val);
     } else {
-	::logger ("Error: munin_set_var_path: Malformatted variable path \"$var\".");
+	logger ("Error: munin_set_var_path: Malformatted variable path \"$var\".");
     }
 
     if (!defined $result) {
-	::logger ("Error: munin_set_var_path: Failed setting \"$var\" = \"$val\".");
+	logger ("Error: munin_set_var_path: Failed setting \"$var\" = \"$val\".");
     }
 
     return $hash;
@@ -768,7 +788,7 @@ sub munin_writeconfig_loop
 	    next if !defined $pre and $key eq "version"; # Handled separately
 	    next if !defined $hash->{$key} or !length $hash->{$key};
             (my $outstring = $hash->{$key}) =~ s/([^\\])#/$1\\#/g;
-	    print "Writing: $path $outstring\n" if $DEBUG;
+	    DEBUG "Writing: $path $outstring\n";
 	    if ($outstring =~ /\\$/)
 	    { # Backslash as last char has special meaning. Avoid it.
 		print $fh "$path $outstring\\\n"; 
@@ -782,12 +802,10 @@ sub munin_writeconfig_loop
 sub munin_writeconfig {
     my ($datafilename,$data,$fh) = @_;
 
-    if (!defined $fh)
-    {
+    if (!defined $fh) {
 	$fh = gensym();
-	unless (open ($fh, ">$datafilename"))
-	{
-	    die "Fatal error: Could not open \"$datafilename\" for writing: $!";
+	unless (open ($fh, ">$datafilename")) {
+	    LOGCROAK "Fatal error: Could not open \"$datafilename\" for writing: $!";
 	}
     }
 
@@ -795,22 +813,21 @@ sub munin_writeconfig {
     print $fh "version $VERSION\n";
     # Write datafile
     &munin_writeconfig_loop ($data, $fh);
-    
+
     if (defined $fh)
     {
-	print "DEBUG: Closing filehandle \"$datafilename\"...\n" if $DEBUG;
+	DEBUG "Closing filehandle \"$datafilename\"...\n";
 	close ($fh);
     }
 }
-    
+
 sub munin_config {
     my $conffile = shift;
     $config = shift;
     $conffile ||= $configfile;
     $config = &munin_readconfig ($conffile);
-    ::logger_open ($config->{logdir});
     my $data = &munin_readconfig("$config->{dbdir}/datafile", 1, 1);
-    
+
     $data = &munin_overwrite($data,$config);
     return ($data);
 }
@@ -912,11 +929,11 @@ sub munin_path_to_loc
 	my @leftarr = split (/;/, $1);
 	$result = [@leftarr];
     } else {
-	::logger ("Error: munin_path_to_loc: Malformatted variable path \"$path\".");
+	logger ("Error: munin_path_to_loc: Malformatted variable path \"$path\".");
     }
 
     if (!defined $result) {
-	::logger ("Error: munin_path_to_loc: Failed converting \"$path\".");
+	logger ("Error: munin_path_to_loc: Failed converting \"$path\".");
     }
 
     return $result;
@@ -1356,7 +1373,7 @@ sub munin_get_rrd_filename {
 
 	for my $f (@COPY_FIELDS) {
 	    if (not exists $field->{$f} and exists $sourcenode->{$f}) {
-		print "DEBUG: Copying $f...\n" if $DEBUG;
+		DEBUG "DEBUG: Copying $f...\n";
 		munin_set_var_loc ($field, [$f], $sourcenode->{$f});
 	    }
 	}
@@ -1383,7 +1400,7 @@ sub munin_mkdir_p
     (my $prev = $dirname) =~ s/\/[^\/]+\/?$//;
     if (munin_mkdir_p ($prev, $umask)) {
 	if (mkdir ($dirname, $umask)) {
-	    ::logger ("Notice: Created directory \"$dirname\".");
+	    logger ("Notice: Created directory \"$dirname\".");
 	    return $dirname;
 	} else {
 	    return undef;
@@ -1393,6 +1410,96 @@ sub munin_mkdir_p
     }
 }
 
+
+#
+# ############# Logging ###########
+#
+# Switching to Log4perl over time.  Management and compatability goes here.
+#
+#
+
+# Early open of the log.  Warning and more urgent messages will go to
+# screen.
+
+Log::Log4perl->easy_init( $WARN );
+
+my $logdir = undef;
+
+sub logger_open {
+    # This is called when we have a directory and file name to log in.
+
+    my $dirname = shift;
+    $logdir=$dirname;
+
+    if (!defined($dirname)) {
+	confess("In logger_open, directory for log files undefined");
+    }
+
+    if (!$logopened) {
+	# I'm a bit uncertain about the :utf8 bit.
+	Log::Log4perl->easy_init( { level    => $INFO,
+				    file     => ":utf8>>$dirname/$me.log" } );
+	# warn "Logging to $dirname/$me.log";
+	$logopened = 1;
+    }
+
+    get_logger('')->info("Opened log file!");
+}
+
+sub logger_debug {
+    # Adjust log level to DEBUG if user gave --debug option
+    my $logger = get_logger('');
+
+    WARN "Setting log level to DEBUG\n";
+
+    if (defined($logdir)) {
+	Log::Log4perl->easy_init( { level    => $DEBUG,
+				    file     => ":utf8>>$logdir/$me.log" },
+				  { level    => $DEBUG,
+				    file     => "STDERR" } );
+    } else {
+	# If we do not have a log file name to log to just send
+	# everything to STDERR
+	Log::Log4perl->easy_init( { level    => $DEBUG,
+				    file     => "STDERR" } );
+    }
+    # And do not open the loggers again now.
+    $logopened=1;
+}
+
+sub logger_level {
+    my ($loglevel) = @_;
+    my $iloglevel;
+
+    my $logger = get_logger('');
+
+    if ($loglevel =~ /^trace$/i) {
+	$iloglevel=$TRACE;
+    } elsif ($loglevel =~ /^debug$/i) {
+	$iloglevel=$DEBUG;
+    } elsif ($loglevel =~ /^info$/i) {
+	$iloglevel=$INFO;
+    } elsif ($loglevel =~ /^warn$/i) {
+	$iloglevel=$WARN;
+    } elsif ($loglevel =~ /^error$/i) {
+	$iloglevel=$ERROR;
+    } elsif ($loglevel =~ /^fatal$/i) {
+	$iloglevel=$FATAL;
+    } else {
+	ERROR "Unknown log level: '$loglevel'\n";
+	return;
+    }
+
+    $logger->level($iloglevel);
+
+    INFO "Setting log level to $loglevel\n";
+}
+
+sub logger {
+  my ($comment) = @_;
+
+  INFO @_;
+}
 
 1;
 

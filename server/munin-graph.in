@@ -1,7 +1,7 @@
 #!@@PERL@@ -w
 # -*- cperl -*-
 #
-# Copyright (C) 2002-2008 Jimmy Olsen, Audun Ytterdal, Nicolai Langfeldt
+# Copyright (C) 2002-2009 Jimmy Olsen, Audun Ytterdal, Nicolai Langfeldt
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -29,6 +29,7 @@ use POSIX qw(strftime);
 use Digest::MD5;
 use Getopt::Long;
 use Time::HiRes;
+if ($RRDs::VERSION >= 1.3) { use Encode; }
 
 my $graph_time= Time::HiRes::time;
 my $DEBUG = 0;
@@ -44,14 +45,14 @@ my $RRDkludge = $RRDs::VERSION < 1.2 ? '' : '\\';
 # And RRDtool 1.2 and later has draws lines with crayons so we hack
 # the LINE* options a bit.
 my $LINEkluge=0;
-if ($RRDs::VERSION >= 1.2) {
+if ($RRDs::VERSION >= 1.2 and $RRDs::VERSION < 1.3) {
+    # Only kluge the line widths in RRD 1.2*
     $LINEkluge=1;
 }
 
 # Force drawing of "graph no".
 my $force_graphing = 0;
 my $force_lazy = 1;
-my $force_root = 0;
 my $do_usage = 0;
 my $do_version = 0;
 my $cron = 0;
@@ -62,13 +63,10 @@ my $stdout = 0;
 my $conffile = "@@CONFDIR@@/munin.conf";
 my %draw = ("day" => 1, "week" => 1, "month" => 1, "year" => 1, "sumyear" => 1, "sumweek" => 1);
 
-my $log = new IO::Handle;
-
 # Get options
 $do_usage=1  unless 
 GetOptions ( "force!"       => \$force_graphing,
 	     "lazy!"        => \$force_lazy,
-	     "force-root!"  => \$force_root,
 	     "host=s"       => \@limit_hosts,
 	     "service=s"    => \@limit_services,
 	     "config=s"     => \$conffile,
@@ -94,7 +92,6 @@ if ($do_usage)
 Options:
     --[no]force		Force drawing of graphs that are not usually
 			drawn due to options in the config file. [--noforce]
-    --[no]force-root	Force running, even as root. [--noforce-root]
     --[no]lazy		Only redraw graphs when needed. [--lazy]
     --help		View this message.
     --version		View version information.
@@ -125,7 +122,7 @@ print <<"EOT";
 munin-graph version $VERSION.
 Written by Audun Ytterdal, Jimmy Olsen, Tore Anderson / Linpro AS
 
-Copyright (C) 2002-2005
+Copyright (C) 2002-2009
 
 This is free software released under the GNU General Public License. There
 is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR
@@ -136,16 +133,17 @@ EOT
     exit 0;
 }
 
-if ($> == 0 and !$force_root)
+if ($> == 0)
 {
-    print "You are running this program as root, which is dumb and will
-cause many problems later.  Please run it as user '@@USER@@'.
-If you really want to run it as root, use the --force-root option.
+    print "This program will easily break if you run it as root as you are
+trying now.  Please run it as user '@@USER@@'.  The correct 'su' command
+on many systems is 'su - munin --shell=/bin/bash'
 Aborting.\n\n";
     exit (1);
 }
 
 my $config= &munin_config ($conffile);
+logger_open($config->{'logdir'});
 
 if (&munin_get ($config, "graph_strategy", "cron") ne "cron" and $cron)
 { # We're run from cron, but munin.conf says we use dynamic graph generation
@@ -233,7 +231,6 @@ logger("Munin-graph finished ($graph_time sec)");
 print STATS "GT|total|$graph_time\n" unless $skip_stats;
 rename ("$config->{dbdir}/munin-graph.stats.tmp", "$config->{dbdir}/munin-graph.stats");
 close STATS unless $skip_stats;
-close $log;
 
 munin_removelock("$config->{rundir}/munin-graph.lock") unless $skip_locking;
 
@@ -654,27 +651,34 @@ sub process_service {
 	logger ("DEBUG: Drawing field \"$fname\".") if $DEBUG;
 
 	if ($single_value) {
-	    # Only one field. Do min/max range.	
+	    # Only one field. Do min/max range.
 	    push (@rrd, "CDEF:min_max_diff=a$rrdname,i$rrdname,-");
-	    push (@rrd, "CDEF:re_zero=min_max_diff,min_max_diff,-") if !munin_get ($field, "negative");
+	    push (@rrd, "CDEF:re_zero=min_max_diff,min_max_diff,-")
+	      if !munin_get ($field, "negative");
+
 	    push (@rrd, "AREA:i$rrdname#ffffff");
 	    push (@rrd, "STACK:min_max_diff$range_colour");
-	    push (@rrd, "LINE2:re_zero#000000") if !munin_get ($field, "negative");
+	    push (@rrd, "LINE2:re_zero#000000") if
+	      !munin_get ($field, "negative");
 	}
 
-	if ($has_negative and !@rrd_negatives) { # Push "global" headers...
+	# Push "global" headers or not
+	if ($has_negative and !@rrd_negatives and $global_headers < 2) {
+	    # Always for -/+ graphs
 	    push (@rrd, "COMMENT:" . (" " x $max_field_len));
-	    push (@rrd, "COMMENT:Cur (-/+)");
+    	    push (@rrd, "COMMENT:Cur (-/+)");
 	    push (@rrd, "COMMENT:Min (-/+)");
 	    push (@rrd, "COMMENT:Avg (-/+)");
 	    push (@rrd, "COMMENT:Max (-/+) \\j");
+	    $global_headers=2; # Avoid further headers/labels
 	} elsif ($global_headers == 1) {
+	    # Or when we want to.
 	    push (@rrd, "COMMENT:" . (" " x $max_field_len));
 	    push (@rrd, "COMMENT: Cur$RRDkludge:");
 	    push (@rrd, "COMMENT:Min$RRDkludge:");
 	    push (@rrd, "COMMENT:Avg$RRDkludge:");
 	    push (@rrd, "COMMENT:Max$RRDkludge:  \\j");
-	    $global_headers++;
+	    $global_headers=2; # Avoid further headers/labels
 	}
 
 	my $colour;
@@ -702,7 +706,7 @@ sub process_service {
 		$negfieldname = $tmpneg;
 		$negfield     = $service->{$negfieldname};
 	    }
-	    
+
 	    if (!@rrd_negatives) {
 		# zero-line, to redraw zero afterwards.
 		push (@rrd_negatives, "CDEF:re_zero=g$negfieldname,UN,0,0,IF");
@@ -826,8 +830,17 @@ sub process_service {
 
 	my @complete = ();
 	if ($RRDkludge) {
+	    # since rrdtool 1.3 with libpango the LEGEND column alignment
+	    # only works with monospace fonts
+	    if ( $RRDs::VERSION >= 1.3 ) {
+		push (@complete,
+  		      '--font' ,'LEGEND:7:monospace');
+	    } else {
+		push (@complete,
+  		      '--font' ,'LEGEND:7:@@LIBDIR@@/VeraMono.ttf');
+	    }
+
 	    push (@complete,
-		  '--font' ,'LEGEND:7:@@LIBDIR@@/VeraMono.ttf',
 		  '--font' ,'UNIT:7:@@LIBDIR@@/VeraMono.ttf',
 		  '--font' ,'AXIS:7:@@LIBDIR@@/VeraMono.ttf');
 	}
@@ -854,6 +867,16 @@ sub process_service {
 
 	# Make sure directory exists
 	munin_mkdir_p ($picdirname, 0777);
+
+	# Since version 1.3 rrdtool uses libpango which needs its input
+	# as utf8 string. So we assume that every input is in latin1
+	# and decode it to perl's internal representation and then to utf8.
+
+	if ( $RRDs::VERSION >= 1.3 ) {
+	    @complete = map {
+		$_ = encode("utf8", (decode("latin1", $_)));
+	    } @complete;
+	}
 
 	RRDs::graph (@complete);
 	if (my $ERROR = RRDs::error) {
@@ -1018,43 +1041,6 @@ sub expand_cdef {
     return ($max, $min, $avg);
 }
 
-sub logger_open {
-    my $dirname = shift;
-
-    if (!$log->opened) {
-	unless (open ($log, ">>$dirname/munin-graph.log")) {
-	    print STDERR "Warning: Could not open log file \"$dirname/munin-graph.log\" for writing: $!";
-	}
-    } else {
-	close (STDERR);
-	*STDERR = \$log;
-    }
-}
-
-sub logger {
-    my ($comment) = @_;
-    my $now = strftime "%b %d %H:%M:%S", localtime;
-
-    print "$now - $comment\n" if $stdout;
-    if ($log->opened) {
-	print $log "$now - $comment\n";
-    } else {
-	if (defined $config->{logdir}) {
-	    if (open ($log, ">>$config->{logdir}/munin-graph.log")) {
-		print $log "$now - $comment\n";
-		$log->flush;
-		close (STDERR);
-		open (STDERR, ">&", $log);
-	    } else {
-		print STDERR "Warning: Could not open log file \"$config->{logdir}/munin-graph.log\" for writing: $!";
-		print STDERR "$now - $comment\n";
-	    }
-	} else {
-	    print STDERR "$now - $comment\n";
-	}
-    }
-}
-
 sub parse_path
 {
     my ($path, $domain, $node, $service, $field) = @_;
@@ -1119,10 +1105,6 @@ If set, only redraw graphs when it would look different from the existing one. [
 =item B<< --help >>
 
 View help.
-
-=item B<< --[no]force-root >>
-
-Force running as root (stupid and unnecessary). [--noforce-root]
 
 =item B<< --[no]debug >>
 
@@ -1198,7 +1180,7 @@ Please report other bugs in the bug tracker at L<http://munin.sf.net/>.
 
 =head1 COPYRIGHT
 
-Copyright (C) 2002-2006 Audun Ytterdal, Jimmy Olsen, Tore Anderson, and Nicolai Langfeldt
+Copyright (C) 2002-2009 Audun Ytterdal, Jimmy Olsen, Tore Anderson, and Nicolai Langfeldt
 
 This is free software; see the source for copying conditions. There is
 NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR

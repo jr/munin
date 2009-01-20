@@ -18,7 +18,8 @@ MAN8		 = node/munin-node node/munin-run \
 			node/munin-node-configure-snmp \
 			node/munin-node-configure \
 			server/munin-graph server/munin-update \
-			server/munin-limits server/munin-html
+			server/munin-limits server/munin-html \
+			server/munin-gather
 PODMAN8          = server/munin-cron
 PODMAN5          = server/munin.conf node/munin-node.conf
 
@@ -65,6 +66,7 @@ install-main: build
 	$(INSTALL) -m 0755 build/server/munin-graph $(LIBDIR)/
 	$(INSTALL) -m 0755 build/server/munin-html $(LIBDIR)/
 	$(INSTALL) -m 0755 build/server/munin-limits $(LIBDIR)/
+	$(INSTALL) -m 0755 build/server/munin-gather $(LIBDIR)/
 	$(INSTALL) -m 0755 build/server/munin-cgi-graph $(CGIDIR)/
 	$(INSTALL) -m 0644 build/server/Munin.pm $(PERLLIB)/
 
@@ -107,14 +109,14 @@ uninstall-node: uninstall-node-non-snmp uninstall-node-snmp
 	echo Undone.
 
 install-node-snmp: build
-	$(INSTALL) -m 0755 build/node/munin-node-configure-snmp $(SBINDIR)/
+	$(INSTALL) -m 0755 build/node/munin-node-configure-snmp $(LIBDIR)/
 
 install-munindoc: build
 	$(INSTALL) -m 0755 build/node/munindoc $(BINDIR)/
 
 uninstall-node-snmp: build
-	rm -f $(SBINDIR)/munin-node-configure-snmp
-	-rmdir $(SBINDIR)
+	rm -f $(LIBDIR)/munin-node-configure-snmp
+	-rmdir $(LIBDIR)
 
 install-node-non-snmp: build
 	$(CHECKGROUP)
@@ -169,8 +171,9 @@ install-node-plugins: build $(PLUGINS) Makefile Makefile.config
 	$(CHMOD) 0775 $(PLUGSTATE)
 	$(INSTALL) -m 0644 build/node/plugins.history $(LIBDIR)/plugins/
 	$(INSTALL) -m 0644 build/node/plugin.sh $(LIBDIR)/plugins/
-	mkdir -p $(PERLLIB)/Munin
+	mkdir -p $(PERLLIB)/Munin/Plugin
 	$(INSTALL) -m 0644 build/node/Plugin.pm $(PERLLIB)/Munin/
+	$(INSTALL) -m 0644 build/node/SNMP.pm $(PERLLIB)/Munin/Plugin/
 
 uninstall-node-plugins: build $(PLUGINS)
 	for p in build/node/node.d.$(OSTYPE)/* build/node/node.d/*; do \
