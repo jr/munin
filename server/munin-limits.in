@@ -241,7 +241,9 @@ sub process_service {
 	} elsif (defined $onfield and defined $onfield->{"state"} or $force) {
 	    munin_set_var_loc (\%notes, [@$fpath, "state"], "ok");
 	    munin_set_var_loc (\%notes, [@$fpath, "ok"], "OK");
-	    $hash->{'state_changed'} = 1;
+            if (!defined $onfield or !defined $onfield->{"state"} or $onfield->{"state"} ne "ok") {
+                $hash->{'state_changed'} = 1;
+            }
 	}
     }
     generate_service_message ($hash);
