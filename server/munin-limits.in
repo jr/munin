@@ -196,17 +196,8 @@ sub process_service {
 
 	logger ("Debug: value: ". join ('::', @{munin_get_node_loc ($hash)}) .": $value (crit: $crit->[0]:$crit->[1]) (warn: $warn->[0]:$warn->[1])") if $DEBUG;
 	if ($value eq "unknown") {
-	    $crit->[0] ||= "";
-	    $crit->[1] ||= "";
-	    $hash->{'worst'} = "UNKNOWN" if $hash->{"worst"} eq "OK";
-	    $hash->{'worstid'} = 3 if $hash->{"worstid"} == 0;
-	    munin_set_var_loc (\%notes, [@$fpath, "state"], "unknown");
-	    munin_set_var_loc (\%notes, [@$fpath, "unknown"], (defined $field->{"extinfo"} ? "unknown: " . $field->{"extinfo"} : "Value is unknown."));
-
-	    if (!defined $onfield or !defined $onfield->{"state"} or $onfield->{"state"} ne "unknown") {
-		$hash->{'state_changed'} = 1;
-	    }
-	} elsif ((defined ($crit->[0]) and $value < $crit->[0]) or
+           next;
+        } elsif ((defined ($crit->[0]) and $value < $crit->[0]) or
 		(defined ($crit->[1]) and $value > $crit->[1])) {
 	    $crit->[0] ||= "";
 	    $crit->[1] ||= "";
